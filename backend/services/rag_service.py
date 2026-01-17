@@ -1,16 +1,16 @@
 """
-RAG Service with Google Gemini via LangChain
+RAG Service with Google Gemini via REST API
 Text-optimized RAG pipeline with FastEmbed and Pinecone
 """
 
 import logging
 from typing import List, Dict, Any, Optional
 import os
+import httpx
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage
 
-load_dotenv()
+# Force override system environment variables with .env values
+load_dotenv(override=True)
 
 from config import get_settings
 from .pdf_service import pdf_service
@@ -24,28 +24,23 @@ settings = get_settings()
 class RAGService:
     """
     RAG Service combining retrieval and generation
-    Uses FastEmbed for text embeddings and Gemini (via LangChain) for answer generation
+    Uses FastEmbed for text embeddings and Gemini (via REST API) for answer generation
     """
     
     def __init__(self):
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
+        self.api_key = os.getenv("GOOGLE_API_KEY")
+        if not self.api_key:
             raise ValueError("GOOGLE_API_KEY environment variable not set")
         
-        # FIX: Added 'max_retries' to automatically handle 429 Resource Exhausted errors.
-        # It will wait and retry several times before giving up.
-        self.model = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
-            google_api_key=api_key,
-            temperature=0.3,
-            max_retries=6,
-        )
-        logger.info("Nexus: Gemini 2.0 Flash model initialized via LangChain")
+        self.model_name = "gemini-2.5-flash"
+        self.temperature = 0.3
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        logger.info(f"Gemini model '{self.model_name}' initialized via REST API")
     
     async def process_query(
         self,
         query: str,
-        top_k: int = 3,  # FIX: Reduced from 5 to 3 to stay under token limits
+        top_k: int = 5,
         doc_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
@@ -53,6 +48,14 @@ class RAGService:
         1. Embed query using FastEmbed
         2. Search Pinecone for relevant text chunks
         3. Send chunks to Gemini for answer generation
+        
+        Args:
+            query: User's question
+            top_k: Number of chunks to retrieve
+            doc_ids: Optional filter by documents
+        
+        Returns:
+            Answer with sources
         """
         try:
             # Step 1: Embed the query
@@ -68,12 +71,12 @@ class RAGService:
             
             if not matches:
                 return {
-                    "answer": "I couldn't find any relevant information in the uploaded documents.",
+                    "answer": "I couldn't find any relevant information in the uploaded documents. Please make sure you have uploaded documents and try again.",
                     "sources": [],
                     "query": query
                 }
             
-            # Step 3: Prepare sources with metadata
+            # Step 3: Prepare sources with chunk text
             sources = []
             context_chunks = []
             
@@ -105,7 +108,7 @@ class RAGService:
             }
             
         except Exception as e:
-            logger.error(f"Error in Nexus RAG pipeline: {str(e)}")
+            logger.error(f"Error in RAG pipeline: {str(e)}")
             raise
     
     async def _generate_answer(
@@ -142,10 +145,8 @@ Instructions:
 
 Answer:"""
 
-            # Generate response using LangChain
-            response = self.model.invoke([HumanMessage(content=prompt)])
-            
-            answer = response.content
+            # Generate response using Gemini REST API
+            answer = await self._call_gemini_api(prompt)
             logger.info(f"Generated answer with {len(answer)} characters")
             
             return answer
@@ -153,6 +154,42 @@ Answer:"""
         except Exception as e:
             logger.error(f"Error generating answer: {str(e)}")
             return f"I encountered an error while analyzing the documents: {str(e)}"
+    
+    async def _call_gemini_api(self, prompt: str) -> str:
+        """
+        Call Gemini API directly via REST
+        """
+        url = f"{self.base_url}/models/{self.model_name}:generateContent?key={self.api_key}"
+        
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": self.temperature
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, json=payload)
+            
+            if response.status_code != 200:
+                error_msg = response.text
+                logger.error(f"Gemini API error: {response.status_code} - {error_msg}")
+                raise Exception(f"Gemini API error: {response.status_code}")
+            
+            result = response.json()
+            
+            # Extract text from response
+            try:
+                return result["candidates"][0]["content"]["parts"][0]["text"]
+            except (KeyError, IndexError) as e:
+                logger.error(f"Unexpected response structure: {result}")
+                raise Exception(f"Failed to parse Gemini response: {e}")
     
     async def summarize_document(self, doc_id: str) -> str:
         """
@@ -168,7 +205,7 @@ Answer:"""
             metadata = pdf_service.get_document_metadata(doc_id)
             doc_name = metadata["original_name"] if metadata else "Unknown Document"
             
-            # Use first chunks for summary
+            # Use first chunks for summary (limit to avoid token limits)
             summary_text = "\n\n".join([chunk.text for chunk in chunks[:10]])
             
             prompt = f"""Please provide a comprehensive summary of this document: "{doc_name}"
@@ -176,17 +213,22 @@ Answer:"""
 Document content (first sections):
 {summary_text}
 
+Provide:
+1. Main topic/subject of the document
+2. Key points or findings
+3. Type of document (report, manual, presentation, etc.)
+4. Any notable sections or data mentioned
+
 Summary:"""
 
-            response = self.model.invoke([HumanMessage(content=prompt)])
+            response = await self._call_gemini_api(prompt)
             
-            return response.content
+            return response
             
         except Exception as e:
             logger.error(f"Error summarizing document: {str(e)}")
             return f"Error generating summary: {str(e)}"
 
 
-# CRITICAL: This singleton instance MUST be exported so the routes 
-# in 'backend/routes/chat.py' can import it as 'rag_service'.
+# Singleton instance
 rag_service = RAGService()
