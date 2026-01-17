@@ -1,67 +1,142 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { FileUploadZone } from "@/components/knowledge/FileUploadZone";
 import { DocumentCard, Document } from "@/components/knowledge/DocumentCard";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Search, Filter, Grid3X3, List } from "lucide-react";
-
-const mockDocuments: Document[] = [
-  {
-    id: "1",
-    name: "Q4_Financial_Report_2024.pdf",
-    size: "2.4 MB",
-    date: "2 hours ago",
-    status: "ready",
-    pages: 48,
-  },
-  {
-    id: "2",
-    name: "Technical_Architecture_v3.pdf",
-    size: "8.1 MB",
-    date: "1 day ago",
-    status: "ready",
-    pages: 124,
-  },
-  {
-    id: "3",
-    name: "Marketing_Strategy_2025.pdf",
-    size: "1.2 MB",
-    date: "2 days ago",
-    status: "processing",
-    pages: 32,
-  },
-  {
-    id: "4",
-    name: "Employee_Handbook_v2.pdf",
-    size: "3.7 MB",
-    date: "1 week ago",
-    status: "ready",
-    pages: 86,
-  },
-  {
-    id: "5",
-    name: "Product_Roadmap_Q1.pdf",
-    size: "956 KB",
-    date: "1 week ago",
-    status: "failed",
-    pages: 18,
-  },
-  {
-    id: "6",
-    name: "Legal_Compliance_Guide.pdf",
-    size: "4.2 MB",
-    date: "2 weeks ago",
-    status: "ready",
-    pages: 156,
-  },
-];
+import { Search, Filter, Grid3X3, List, RefreshCw } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+import { api, ProcessingStatus } from "@/lib/api";
 
 export default function Knowledge() {
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [processingDocs, setProcessingDocs] = useState<Map<string, ProcessingStatus>>(new Map());
+  const { toast } = useToast();
 
-  const filteredDocuments = mockDocuments.filter((doc) =>
+  // Load documents on mount
+  const loadDocuments = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      const response = await api.listDocuments();
+      setDocuments(response.documents.map(doc => ({
+        id: doc.id,
+        name: doc.name,
+        size: doc.size,
+        date: new Date(doc.created_at).toLocaleDateString(),
+        status: doc.status === 'ready' ? 'ready' : 
+                doc.status === 'failed' ? 'failed' : 'processing',
+        pages: doc.pages,
+      })));
+    } catch (error) {
+      console.error("Failed to load documents:", error);
+      toast({
+        title: "Error",
+        description: "Failed to load documents. Is the backend running?",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    loadDocuments();
+  }, [loadDocuments]);
+
+  // Handle file upload
+  const handleFileUpload = async (file: File, onProgress: (status: ProcessingStatus) => void) => {
+    try {
+      // Upload file
+      const uploadResponse = await api.uploadDocument(file);
+      
+      toast({
+        title: "Upload Started",
+        description: `Processing ${file.name}...`,
+      });
+
+      // Add to documents list immediately
+      const newDoc: Document = {
+        id: uploadResponse.doc_id,
+        name: uploadResponse.name,
+        size: formatSize(file.size),
+        date: "Just now",
+        status: "processing",
+        pages: 0,
+      };
+      setDocuments(prev => [newDoc, ...prev]);
+
+      // Poll for status updates
+      await api.pollDocumentStatus(
+        uploadResponse.doc_id,
+        (status) => {
+          onProgress(status);
+          setProcessingDocs(prev => new Map(prev).set(status.doc_id, status));
+          
+          // Update document in list
+          setDocuments(prev => prev.map(doc => 
+            doc.id === status.doc_id 
+              ? { 
+                  ...doc, 
+                  status: status.status === 'ready' ? 'ready' : 
+                          status.status === 'failed' ? 'failed' : 'processing',
+                  pages: status.total_pages || doc.pages 
+                }
+              : doc
+          ));
+        }
+      );
+
+      toast({
+        title: "Success!",
+        description: `${file.name} has been indexed and is ready for chat.`,
+      });
+
+    } catch (error) {
+      console.error("Upload failed:", error);
+      toast({
+        title: "Upload Failed",
+        description: error instanceof Error ? error.message : "Unknown error",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  // Handle document deletion
+  const handleDelete = async (docId: string) => {
+    try {
+      await api.deleteDocument(docId);
+      setDocuments(prev => prev.filter(doc => doc.id !== docId));
+      toast({
+        title: "Deleted",
+        description: "Document has been removed.",
+      });
+    } catch (error) {
+      console.error("Delete failed:", error);
+      toast({
+        title: "Delete Failed",
+        description: error instanceof Error ? error.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Handle view document
+  const handleView = (docId: string) => {
+    // Navigate to chat with this document selected
+    window.location.href = `/chat?doc=${docId}`;
+  };
+
+  const formatSize = (bytes: number) => {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  };
+
+  const filteredDocuments = documents.filter((doc) =>
     doc.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -78,7 +153,7 @@ export default function Knowledge() {
 
         {/* Upload Zone */}
         <div className="mb-8">
-          <FileUploadZone />
+          <FileUploadZone onUpload={handleFileUpload} />
         </div>
 
         {/* Documents Section */}
@@ -86,6 +161,14 @@ export default function Knowledge() {
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Your Documents</h2>
             <div className="flex items-center gap-3">
+              <Button 
+                variant="outline" 
+                size="icon" 
+                onClick={loadDocuments}
+                disabled={isLoading}
+              >
+                <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
+              </Button>
               <div className="relative w-64">
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
@@ -119,27 +202,42 @@ export default function Knowledge() {
             </div>
           </div>
 
-          {/* Documents Grid/List */}
-          <div
-            className={
-              viewMode === "grid"
-                ? "grid gap-4 md:grid-cols-2 lg:grid-cols-3"
-                : "space-y-3"
-            }
-          >
-            {filteredDocuments.map((doc) => (
-              <DocumentCard
-                key={doc.id}
-                document={doc}
-                onView={(id) => console.log("View:", id)}
-                onDelete={(id) => console.log("Delete:", id)}
-              />
-            ))}
-          </div>
-
-          {filteredDocuments.length === 0 && (
+          {/* Loading State */}
+          {isLoading && documents.length === 0 && (
             <div className="text-center py-12">
-              <p className="text-muted-foreground">No documents found.</p>
+              <RefreshCw className="h-8 w-8 animate-spin mx-auto text-muted-foreground" />
+              <p className="mt-2 text-muted-foreground">Loading documents...</p>
+            </div>
+          )}
+
+          {/* Documents Grid/List */}
+          {!isLoading && (
+            <div
+              className={
+                viewMode === "grid"
+                  ? "grid gap-4 md:grid-cols-2 lg:grid-cols-3"
+                  : "space-y-3"
+              }
+            >
+              {filteredDocuments.map((doc) => (
+                <DocumentCard
+                  key={doc.id}
+                  document={doc}
+                  processingStatus={processingDocs.get(doc.id)}
+                  onView={handleView}
+                  onDelete={handleDelete}
+                />
+              ))}
+            </div>
+          )}
+
+          {!isLoading && filteredDocuments.length === 0 && (
+            <div className="text-center py-12">
+              <p className="text-muted-foreground">
+                {documents.length === 0 
+                  ? "No documents uploaded yet. Upload a PDF to get started!"
+                  : "No documents found matching your search."}
+              </p>
             </div>
           )}
         </div>

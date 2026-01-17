@@ -1,18 +1,24 @@
 import { useState, useCallback } from "react";
 import { cn } from "@/lib/utils";
-import { Upload, FileText, X, CheckCircle } from "lucide-react";
+import { Upload, FileText, X, CheckCircle, AlertCircle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import { ProcessingStatus } from "@/lib/api";
 
 interface UploadingFile {
   id: string;
   name: string;
   size: number;
   progress: number;
-  status: "uploading" | "complete" | "error";
+  status: "uploading" | "processing" | "embedding" | "indexed" | "complete" | "error";
+  message?: string;
 }
 
-export function FileUploadZone() {
+interface FileUploadZoneProps {
+  onUpload?: (file: File, onProgress: (status: ProcessingStatus) => void) => Promise<void>;
+}
+
+export function FileUploadZone({ onUpload }: FileUploadZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
 
@@ -26,35 +32,70 @@ export function FileUploadZone() {
     setIsDragging(false);
   }, []);
 
-  const simulateUpload = (file: File) => {
+  const processFile = async (file: File) => {
+    // Validate file type
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      const errorFile: UploadingFile = {
+        id: Math.random().toString(36).substr(2, 9),
+        name: file.name,
+        size: file.size,
+        progress: 0,
+        status: "error",
+        message: "Only PDF files are supported",
+      };
+      setUploadingFiles((prev) => [...prev, errorFile]);
+      return;
+    }
+
     const uploadFile: UploadingFile = {
       id: Math.random().toString(36).substr(2, 9),
       name: file.name,
       size: file.size,
-      progress: 0,
+      progress: 5,
       status: "uploading",
+      message: "Starting upload...",
     };
 
     setUploadingFiles((prev) => [...prev, uploadFile]);
 
-    // Simulate upload progress
-    const interval = setInterval(() => {
-      setUploadingFiles((prev) =>
-        prev.map((f) => {
-          if (f.id === uploadFile.id) {
-            const newProgress = Math.min(f.progress + 10, 100);
-            return {
-              ...f,
-              progress: newProgress,
-              status: newProgress === 100 ? "complete" : "uploading",
-            };
-          }
-          return f;
-        })
-      );
-    }, 200);
-
-    setTimeout(() => clearInterval(interval), 2200);
+    if (onUpload) {
+      try {
+        await onUpload(file, (status: ProcessingStatus) => {
+          setUploadingFiles((prev) =>
+            prev.map((f) => {
+              if (f.name === file.name) {
+                let displayStatus: UploadingFile["status"] = "processing";
+                if (status.status === "ready") displayStatus = "complete";
+                else if (status.status === "failed") displayStatus = "error";
+                else if (status.status === "embedding") displayStatus = "embedding";
+                else if (status.status === "indexed") displayStatus = "indexed";
+                
+                return {
+                  ...f,
+                  progress: status.progress,
+                  status: displayStatus,
+                  message: status.message,
+                };
+              }
+              return f;
+            })
+          );
+        });
+      } catch (error) {
+        setUploadingFiles((prev) =>
+          prev.map((f) => {
+            if (f.name === file.name) {
+              return {
+                ...f,
+                status: "error",
+                message: error instanceof Error ? error.message : "Upload failed",
+              };
+            }
+            return f;
+          })
+        );
+      }
+    }
   };
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -62,12 +103,14 @@ export function FileUploadZone() {
     setIsDragging(false);
     
     const files = Array.from(e.dataTransfer.files);
-    files.forEach(simulateUpload);
-  }, []);
+    files.forEach(processFile);
+  }, [onUpload]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    files.forEach(simulateUpload);
+    files.forEach(processFile);
+    // Reset input
+    e.target.value = '';
   };
 
   const removeFile = (id: string) => {
@@ -78,6 +121,37 @@ export function FileUploadZone() {
     if (bytes < 1024) return bytes + " B";
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
     return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  };
+
+  const getStatusIcon = (status: UploadingFile["status"]) => {
+    switch (status) {
+      case "complete":
+        return <CheckCircle className="h-5 w-5 text-success" />;
+      case "error":
+        return <AlertCircle className="h-5 w-5 text-destructive" />;
+      default:
+        return <Loader2 className="h-5 w-5 text-primary animate-spin" />;
+    }
+  };
+
+  const getStatusText = (file: UploadingFile) => {
+    if (file.message) return file.message;
+    switch (file.status) {
+      case "uploading":
+        return "Uploading...";
+      case "processing":
+        return "Processing PDF...";
+      case "embedding":
+        return "Generating embeddings...";
+      case "indexed":
+        return "Storing in vector database...";
+      case "complete":
+        return "Ready for chat!";
+      case "error":
+        return "Failed";
+      default:
+        return "";
+    }
   };
 
   return (
@@ -96,7 +170,7 @@ export function FileUploadZone() {
         <input
           type="file"
           multiple
-          accept=".pdf,.doc,.docx,.txt"
+          accept=".pdf"
           onChange={handleFileSelect}
           className="absolute inset-0 cursor-pointer opacity-0"
         />
@@ -109,9 +183,9 @@ export function FileUploadZone() {
           >
             <Upload className={cn("h-8 w-8", isDragging ? "text-primary" : "text-muted-foreground")} />
           </div>
-          <p className="text-lg font-medium">Drop files here or click to upload</p>
+          <p className="text-lg font-medium">Drop PDF files here or click to upload</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            PDF, DOC, DOCX, TXT up to 50MB each
+            PDF files up to 50MB each
           </p>
         </div>
       </div>
@@ -122,10 +196,19 @@ export function FileUploadZone() {
           {uploadingFiles.map((file) => (
             <div
               key={file.id}
-              className="flex items-center gap-4 rounded-lg border border-border bg-card p-4 animate-slide-in-up"
+              className={cn(
+                "flex items-center gap-4 rounded-lg border bg-card p-4 animate-slide-in-up",
+                file.status === "error" ? "border-destructive/50" : "border-border"
+              )}
             >
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-secondary">
-                <FileText className="h-5 w-5 text-muted-foreground" />
+              <div className={cn(
+                "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg",
+                file.status === "error" ? "bg-destructive/10" : "bg-secondary"
+              )}>
+                <FileText className={cn(
+                  "h-5 w-5",
+                  file.status === "error" ? "text-destructive" : "text-muted-foreground"
+                )} />
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center justify-between">
@@ -134,22 +217,33 @@ export function FileUploadZone() {
                     {formatSize(file.size)}
                   </span>
                 </div>
-                <div className="mt-2">
-                  <Progress value={file.progress} className="h-1" />
-                </div>
+                <p className={cn(
+                  "text-xs mt-1",
+                  file.status === "error" ? "text-destructive" : "text-muted-foreground"
+                )}>
+                  {getStatusText(file)}
+                </p>
+                {file.status !== "complete" && file.status !== "error" && (
+                  <div className="mt-2">
+                    <Progress value={file.progress} className="h-1" />
+                  </div>
+                )}
               </div>
               <div className="shrink-0">
-                {file.status === "complete" ? (
-                  <CheckCircle className="h-5 w-5 text-success" />
+                {file.status === "complete" || file.status === "error" ? (
+                  <div className="flex items-center gap-2">
+                    {getStatusIcon(file.status)}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => removeFile(file.id)}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
                 ) : (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={() => removeFile(file.id)}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
+                  getStatusIcon(file.status)
                 )}
               </div>
             </div>
