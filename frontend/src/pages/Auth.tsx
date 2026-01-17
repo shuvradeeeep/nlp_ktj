@@ -1,22 +1,32 @@
 import { useNavigate } from "react-router-dom";
 import { AuthCard } from "@/components/auth/AuthCard";
+import { useToast } from "@/hooks/use-toast";
+import { CredentialResponse } from "@react-oauth/google";
 
 export default function Auth() {
   const navigate = useNavigate();
+  const { toast } = useToast();
 
-  const handleLogin = (email: string, password: string) => {
-    console.log("Login:", { email, password });
+  const handleGoogleSuccess = (credentialResponse: CredentialResponse) => {
+    console.log("Google Auth Success:", credentialResponse);
+    
+    // In a real app, you would verify the JWT token (credentialResponse.credential) 
+    // on your backend here. For now, we proceed to the dashboard.
+    toast({
+      title: "Success",
+      description: "Logged in with Google successfully!",
+    });
+    
     navigate("/dashboard");
   };
 
-  const handleSignUp = (email: string, password: string, name: string) => {
-    console.log("Sign up:", { email, password, name });
-    navigate("/dashboard");
-  };
-
-  const handleGoogleAuth = () => {
-    console.log("Google auth");
-    navigate("/dashboard");
+  const handleGoogleError = () => {
+    console.log("Google Auth Failed");
+    toast({
+      variant: "destructive",
+      title: "Error",
+      description: "Google Sign-In failed. Please try again.",
+    });
   };
 
   return (
@@ -35,10 +45,10 @@ export default function Auth() {
       />
 
       <div className="relative z-10 w-full max-w-md px-4">
+        {/* Updated AuthCard props to match the streamlined component */}
         <AuthCard
-          onLogin={handleLogin}
-          onSignUp={handleSignUp}
-          onGoogleAuth={handleGoogleAuth}
+          onGoogleSuccess={handleGoogleSuccess}
+          onGoogleError={handleGoogleError}
         />
         
         <p className="mt-8 text-center text-sm text-muted-foreground">

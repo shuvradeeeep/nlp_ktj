@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom"; // Added useNavigate
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,6 +30,12 @@ const navItems: NavItem[] = [
 export function AppSidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const location = useLocation();
+  const navigate = useNavigate(); // Initialize navigate
+
+  const handleLogout = () => {
+    // Redirect user to the authentication page
+    navigate("/auth");
+  };
 
   return (
     <aside
@@ -83,6 +89,7 @@ export function AppSidebar() {
           <Button
             variant="ghost"
             size="sm"
+            onClick={handleLogout} // Added onClick handler
             className={cn(
               "w-full justify-start text-sidebar-foreground hover:bg-sidebar-accent/50",
               collapsed && "justify-center"
