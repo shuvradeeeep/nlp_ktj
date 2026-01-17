@@ -8,6 +8,10 @@ import os
 from typing import Optional
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+from dotenv import load_dotenv
+
+# Force override system environment variables with .env values
+load_dotenv(override=True)
 
 
 class Settings(BaseSettings):
@@ -19,7 +23,8 @@ class Settings(BaseSettings):
     pinecone_index_name: str = "nexus-text"
     
     # Google Gemini Configuration
-    google_api_key: str
+    #load from .env or environment variable
+    google_api_key: str=os.getenv("GOOGLE_API_KEY")
     
     # Application Settings
     upload_dir: str = "./uploads"

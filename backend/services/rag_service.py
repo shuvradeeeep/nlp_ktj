@@ -1,16 +1,16 @@
 """
-RAG Service with Google Gemini via LangChain
+RAG Service with Google Gemini via REST API
 Text-optimized RAG pipeline with FastEmbed and Pinecone
 """
 
 import logging
 from typing import List, Dict, Any, Optional
 import os
+import httpx
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage
 
-load_dotenv()
+# Force override system environment variables with .env values
+load_dotenv(override=True)
 
 from config import get_settings
 from .pdf_service import pdf_service
@@ -24,20 +24,18 @@ settings = get_settings()
 class RAGService:
     """
     RAG Service combining retrieval and generation
-    Uses FastEmbed for text embeddings and Gemini (via LangChain) for answer generation
+    Uses FastEmbed for text embeddings and Gemini (via REST API) for answer generation
     """
     
     def __init__(self):
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
+        self.api_key = os.getenv("GOOGLE_API_KEY")
+        if not self.api_key:
             raise ValueError("GOOGLE_API_KEY environment variable not set")
         
-        self.model = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
-            google_api_key=api_key,
-            temperature=0.3
-        )
-        logger.info("Gemini model initialized via LangChain")
+        self.model_name = "gemini-2.5-flash"
+        self.temperature = 0.3
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        logger.info(f"Gemini model '{self.model_name}' initialized via REST API")
     
     async def process_query(
         self,
@@ -154,10 +152,8 @@ Instructions:
 
 Answer:"""
 
-            # Generate response using LangChain
-            response = self.model.invoke([HumanMessage(content=prompt)])
-            
-            answer = response.content
+            # Generate response using Gemini REST API
+            answer = await self._call_gemini_api(prompt)
             logger.info(f"Generated answer with {len(answer)} characters")
             
             return answer
@@ -165,6 +161,48 @@ Answer:"""
         except Exception as e:
             logger.error(f"Error generating answer: {str(e)}")
             return f"I encountered an error while analyzing the documents: {str(e)}"
+    
+    async def _call_gemini_api(self, prompt: str) -> str:
+        """
+        Call Gemini API directly via REST
+        
+        Args:
+            prompt: The prompt to send to the model
+        
+        Returns:
+            Generated text response
+        """
+        url = f"{self.base_url}/models/{self.model_name}:generateContent?key={self.api_key}"
+        
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": self.temperature
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, json=payload)
+            
+            if response.status_code != 200:
+                error_msg = response.text
+                logger.error(f"Gemini API error: {response.status_code} - {error_msg}")
+                raise Exception(f"Gemini API error: {response.status_code}")
+            
+            result = response.json()
+            
+            # Extract text from response
+            try:
+                return result["candidates"][0]["content"]["parts"][0]["text"]
+            except (KeyError, IndexError) as e:
+                logger.error(f"Unexpected response structure: {result}")
+                raise Exception(f"Failed to parse Gemini response: {e}")
     
     async def summarize_document(self, doc_id: str) -> str:
         """
@@ -202,9 +240,9 @@ Provide:
 
 Summary:"""
 
-            response = self.model.invoke([HumanMessage(content=prompt)])
+            response = await self._call_gemini_api(prompt)
             
-            return response.content
+            return response
             
         except Exception as e:
             logger.error(f"Error summarizing document: {str(e)}")
