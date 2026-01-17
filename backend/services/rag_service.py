@@ -32,17 +32,20 @@ class RAGService:
         if not api_key:
             raise ValueError("GOOGLE_API_KEY environment variable not set")
         
+        # FIX: Added 'max_retries' to automatically handle 429 Resource Exhausted errors.
+        # It will wait and retry several times before giving up.
         self.model = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
+            model="gemini-2.0-flash",
             google_api_key=api_key,
-            temperature=0.3
+            temperature=0.3,
+            max_retries=6,
         )
-        logger.info("Gemini model initialized via LangChain")
+        logger.info("Nexus: Gemini 2.0 Flash model initialized via LangChain")
     
     async def process_query(
         self,
         query: str,
-        top_k: int = 5,
+        top_k: int = 3,  # FIX: Reduced from 5 to 3 to stay under token limits
         doc_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
@@ -50,14 +53,6 @@ class RAGService:
         1. Embed query using FastEmbed
         2. Search Pinecone for relevant text chunks
         3. Send chunks to Gemini for answer generation
-        
-        Args:
-            query: User's question
-            top_k: Number of chunks to retrieve
-            doc_ids: Optional filter by documents
-        
-        Returns:
-            Answer with sources
         """
         try:
             # Step 1: Embed the query
@@ -73,12 +68,12 @@ class RAGService:
             
             if not matches:
                 return {
-                    "answer": "I couldn't find any relevant information in the uploaded documents. Please make sure you have uploaded documents and try again.",
+                    "answer": "I couldn't find any relevant information in the uploaded documents.",
                     "sources": [],
                     "query": query
                 }
             
-            # Step 3: Prepare sources with chunk text
+            # Step 3: Prepare sources with metadata
             sources = []
             context_chunks = []
             
@@ -110,7 +105,7 @@ class RAGService:
             }
             
         except Exception as e:
-            logger.error(f"Error in RAG pipeline: {str(e)}")
+            logger.error(f"Error in Nexus RAG pipeline: {str(e)}")
             raise
     
     async def _generate_answer(
@@ -120,13 +115,6 @@ class RAGService:
     ) -> str:
         """
         Generate answer using Gemini with retrieved context
-        
-        Args:
-            query: User's question
-            context_chunks: List of relevant text chunks with metadata
-        
-        Returns:
-            Generated answer string
         """
         try:
             # Build context from chunks
@@ -169,12 +157,6 @@ Answer:"""
     async def summarize_document(self, doc_id: str) -> str:
         """
         Generate a summary of an entire document
-        
-        Args:
-            doc_id: Document identifier
-        
-        Returns:
-            Document summary
         """
         try:
             # Extract text from document
@@ -186,19 +168,13 @@ Answer:"""
             metadata = pdf_service.get_document_metadata(doc_id)
             doc_name = metadata["original_name"] if metadata else "Unknown Document"
             
-            # Use first chunks for summary (limit to avoid token limits)
+            # Use first chunks for summary
             summary_text = "\n\n".join([chunk.text for chunk in chunks[:10]])
             
             prompt = f"""Please provide a comprehensive summary of this document: "{doc_name}"
 
 Document content (first sections):
 {summary_text}
-
-Provide:
-1. Main topic/subject of the document
-2. Key points or findings
-3. Type of document (report, manual, presentation, etc.)
-4. Any notable sections or data mentioned
 
 Summary:"""
 
@@ -211,5 +187,6 @@ Summary:"""
             return f"Error generating summary: {str(e)}"
 
 
-# Singleton instance
+# CRITICAL: This singleton instance MUST be exported so the routes 
+# in 'backend/routes/chat.py' can import it as 'rag_service'.
 rag_service = RAGService()
