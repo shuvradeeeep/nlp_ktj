@@ -1,48 +1,35 @@
 import { useState, useRef, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { ChatMessage, ChatMessageType, Citation } from "@/components/chat/ChatMessage";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { PDFViewer } from "@/components/chat/PDFViewer";
 import { CommandPalette } from "@/components/actions/CommandPalette";
 import { Button } from "@/components/ui/button";
-import { PanelRightClose, PanelRight, Sparkles } from "lucide-react";
+import { PanelRightClose, PanelRight, Sparkles, FileText, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { api, SourcePage } from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
 
-const mockMessages: ChatMessageType[] = [
-  {
-    id: "1",
-    role: "assistant",
-    content:
-      "Hello! I'm your AI assistant. I've analyzed all 24 documents in your knowledge base. How can I help you today?",
-    timestamp: new Date(Date.now() - 60000 * 5),
-  },
-  {
-    id: "2",
-    role: "user",
-    content: "What were the key findings from the Q4 financial report?",
-    timestamp: new Date(Date.now() - 60000 * 4),
-  },
-  {
-    id: "3",
-    role: "assistant",
-    content:
-      "Based on the Q4 Financial Report, here are the key findings:\n\n1. **Revenue Growth**: Total revenue increased by 23% YoY, reaching $14.2M\n\n2. **Operating Margins**: Improved to 18.5%, up from 15.2% in Q3\n\n3. **Customer Acquisition**: Added 847 new enterprise customers\n\n4. **Cash Position**: Strong cash reserves of $42.3M with zero debt",
-    citations: [
-      { id: "c1", title: "Q4_Financial_Report.pdf", page: 4 },
-      { id: "c2", title: "Q4_Financial_Report.pdf", page: 12 },
-    ],
-    timestamp: new Date(Date.now() - 60000 * 3),
-  },
-];
+interface DocumentInfo {
+  id: string;
+  name: string;
+  pages: number;
+}
 
 export default function Chat() {
-  const [messages, setMessages] = useState<ChatMessageType[]>(mockMessages);
+  const [searchParams] = useSearchParams();
+  const [messages, setMessages] = useState<ChatMessageType[]>([]);
   const [showPDFViewer, setShowPDFViewer] = useState(true);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedDocument, setSelectedDocument] = useState("Q4_Financial_Report.pdf");
-  const [highlightedSection, setHighlightedSection] = useState<string | undefined>();
+  const [selectedDocument, setSelectedDocument] = useState<string | null>(null);
+  const [selectedPage, setSelectedPage] = useState<number | null>(null);
+  const [pageImageData, setPageImageData] = useState<string | null>(null);
+  const [documents, setDocuments] = useState<DocumentInfo[]>([]);
+  const [isLoadingDocs, setIsLoadingDocs] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const { toast } = useToast();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -52,7 +39,77 @@ export default function Chat() {
     scrollToBottom();
   }, [messages]);
 
+  // Load available documents on mount
+  useEffect(() => {
+    const loadDocuments = async () => {
+      try {
+        setIsLoadingDocs(true);
+        const response = await api.listDocuments();
+        const readyDocs = response.documents
+          .filter(doc => doc.status === 'ready')
+          .map(doc => ({
+            id: doc.id,
+            name: doc.name,
+            pages: doc.pages,
+          }));
+        setDocuments(readyDocs);
+
+        // Check if a specific doc was requested via URL
+        const docId = searchParams.get('doc');
+        if (docId) {
+          const doc = readyDocs.find(d => d.id === docId);
+          if (doc) {
+            setSelectedDocument(doc.name);
+          }
+        }
+
+        // Add welcome message
+        if (readyDocs.length > 0) {
+          setMessages([{
+            id: "welcome",
+            role: "assistant",
+            content: `Hello! I'm your AI assistant. I've analyzed ${readyDocs.length} document(s) in your knowledge base:\n\n${readyDocs.map(d => `• ${d.name} (${d.pages} pages)`).join('\n')}\n\nHow can I help you today?`,
+            timestamp: new Date(),
+          }]);
+        } else {
+          setMessages([{
+            id: "welcome",
+            role: "assistant",
+            content: "Hello! I'm your AI assistant. You haven't uploaded any documents yet. Please go to the Knowledge Base page to upload PDFs first, then come back to chat with them!",
+            timestamp: new Date(),
+          }]);
+        }
+      } catch (error) {
+        console.error("Failed to load documents:", error);
+        toast({
+          title: "Connection Error",
+          description: "Could not connect to the backend. Is it running?",
+          variant: "destructive",
+        });
+        setMessages([{
+          id: "error",
+          role: "assistant",
+          content: "⚠️ I couldn't connect to the backend server. Please make sure it's running on http://localhost:8000",
+          timestamp: new Date(),
+        }]);
+      } finally {
+        setIsLoadingDocs(false);
+      }
+    };
+
+    loadDocuments();
+  }, [searchParams, toast]);
+
   const handleSend = async (content: string) => {
+    if (documents.length === 0) {
+      toast({
+        title: "No Documents",
+        description: "Please upload documents in the Knowledge Base first.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     const userMessage: ChatMessageType = {
       id: Date.now().toString(),
       role: "user",
@@ -62,26 +119,86 @@ export default function Chat() {
     setMessages((prev) => [...prev, userMessage]);
     setIsLoading(true);
 
-    // Simulate AI response
-    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      // Call the RAG API
+      const response = await api.chat(content, 3);
+      
+      // Convert sources to citations
+      const citations: Citation[] = response.sources.map((source, idx) => ({
+        id: `c${idx}`,
+        title: source.doc_name,
+        page: source.page_num,
+        docId: source.doc_id,
+        imageData: source.page_image_base64 ? `data:image/png;base64,${source.page_image_base64}` : undefined,
+      }));
 
-    const aiMessage: ChatMessageType = {
-      id: (Date.now() + 1).toString(),
-      role: "assistant",
-      content:
-        "I've analyzed your query against the knowledge base. Based on the relevant documents, here's what I found...\n\nThe information you're looking for can be found in multiple sections across your documents.",
-      citations: [
-        { id: "c1", title: selectedDocument, page: 7 },
-      ],
-      timestamp: new Date(),
-    };
-    setMessages((prev) => [...prev, aiMessage]);
-    setIsLoading(false);
+      // Format answer with page references
+      let formattedAnswer = response.answer;
+      
+      // Add source page info at the end if not already mentioned
+      if (response.sources.length > 0) {
+        const sourceInfo = response.sources.map(s => 
+          `Page ${s.page_num} of "${s.doc_name}" (${(s.similarity_score * 100).toFixed(1)}% match)`
+        ).join('\n');
+        
+        if (!formattedAnswer.toLowerCase().includes('page')) {
+          formattedAnswer += `\n\n📄 **Sources:**\n${sourceInfo}`;
+        }
+      }
+
+      const aiMessage: ChatMessageType = {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: formattedAnswer,
+        citations,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, aiMessage]);
+
+      // Auto-show first source in PDF viewer
+      if (response.sources.length > 0) {
+        const firstSource = response.sources[0];
+        setSelectedDocument(firstSource.doc_name);
+        setSelectedPage(firstSource.page_num);
+        if (firstSource.page_image_base64) {
+          setPageImageData(`data:image/png;base64,${firstSource.page_image_base64}`);
+        }
+        if (!showPDFViewer) {
+          setShowPDFViewer(true);
+        }
+      }
+
+    } catch (error) {
+      console.error("Chat error:", error);
+      const errorMessage: ChatMessageType = {
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: `⚠️ Sorry, I encountered an error: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const handleCitationClick = (citation: Citation) => {
+  const handleCitationClick = async (citation: Citation & { docId?: string; imageData?: string }) => {
     setSelectedDocument(citation.title);
-    setHighlightedSection(`Page ${citation.page}`);
+    setSelectedPage(citation.page || null);
+    
+    // If we have the image data from the response, use it
+    if (citation.imageData) {
+      setPageImageData(citation.imageData);
+    } else if (citation.docId && citation.page) {
+      // Otherwise fetch it
+      try {
+        const pageResponse = await api.getPageImage(citation.docId, citation.page);
+        setPageImageData(pageResponse.image);
+      } catch (error) {
+        console.error("Failed to load page:", error);
+      }
+    }
+    
     if (!showPDFViewer) {
       setShowPDFViewer(true);
     }
@@ -99,8 +216,9 @@ export default function Chat() {
         >
           {showPDFViewer && (
             <PDFViewer
-              documentName={selectedDocument}
-              highlightedSection={highlightedSection}
+              documentName={selectedDocument || "No document selected"}
+              pageNumber={selectedPage}
+              pageImageData={pageImageData}
               onClose={() => setShowPDFViewer(false)}
             />
           )}
@@ -117,21 +235,29 @@ export default function Chat() {
               <div>
                 <h2 className="font-semibold">Nexus AI Assistant</h2>
                 <p className="text-xs text-muted-foreground">
-                  24 documents indexed
+                  {isLoadingDocs ? "Loading..." : `${documents.length} document(s) indexed`}
                 </p>
               </div>
             </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setShowPDFViewer(!showPDFViewer)}
-            >
-              {showPDFViewer ? (
-                <PanelRightClose className="h-5 w-5" />
-              ) : (
-                <PanelRight className="h-5 w-5" />
+            <div className="flex items-center gap-2">
+              {documents.length === 0 && !isLoadingDocs && (
+                <div className="flex items-center gap-2 text-xs text-amber-500">
+                  <AlertCircle className="h-4 w-4" />
+                  <span>No documents</span>
+                </div>
               )}
-            </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setShowPDFViewer(!showPDFViewer)}
+              >
+                {showPDFViewer ? (
+                  <PanelRightClose className="h-5 w-5" />
+                ) : (
+                  <PanelRight className="h-5 w-5" />
+                )}
+              </Button>
+            </div>
           </div>
 
           {/* Messages */}
@@ -148,12 +274,13 @@ export default function Chat() {
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-primary shadow-glow">
                   <Sparkles className="h-5 w-5 text-primary-foreground animate-pulse" />
                 </div>
-                <div className="flex items-center gap-2 rounded-2xl rounded-tl-md bg-card border border-border px-4 py-3">
+                <div className="flex flex-col gap-2 rounded-2xl rounded-tl-md bg-card border border-border px-4 py-3">
                   <div className="flex gap-1">
                     <div className="w-2 h-2 rounded-full bg-primary animate-bounce" style={{ animationDelay: "0ms" }} />
                     <div className="w-2 h-2 rounded-full bg-primary animate-bounce" style={{ animationDelay: "150ms" }} />
                     <div className="w-2 h-2 rounded-full bg-primary animate-bounce" style={{ animationDelay: "300ms" }} />
                   </div>
+                  <span className="text-xs text-muted-foreground">Searching documents and generating answer...</span>
                 </div>
               </div>
             )}
@@ -165,7 +292,8 @@ export default function Chat() {
             <ChatInput
               onSend={handleSend}
               onCommand={() => setShowCommandPalette(true)}
-              disabled={isLoading}
+              disabled={isLoading || documents.length === 0}
+              placeholder={documents.length === 0 ? "Upload documents first..." : "Ask a question about your documents..."}
             />
           </div>
         </div>

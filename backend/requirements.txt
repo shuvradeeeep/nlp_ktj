@@ -1,0 +1,21 @@
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+pydantic
+pydantic-settings
+
+# PDF Processing
+# PyMuPDF>=1.23.0
+# Pillow>=10.0.0
+
+# AI/ML Services
+fastembed>=0.2.0
+pinecone
+google-generativeai
+# langchain_google_genai
+
+# Utilities
+python-dotenv
+aiofiles
+httpx
